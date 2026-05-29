@@ -14,10 +14,10 @@ image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "build-essential", "ninja-build")
     .pip_install(
-        "torch==2.2.1",
-        "transformers>=4.40.0",
-        "bitsandbytes>=0.43.0",
-        "accelerate",
+        "torch==2.4.1",
+        "transformers==4.46.3",
+        "bitsandbytes==0.44.1",
+        "accelerate==1.1.1",
         "sentencepiece",
         "protobuf",
         "huggingface_hub[hf_transfer]",
