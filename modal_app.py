@@ -11,13 +11,13 @@ app = modal.App(APP_NAME)
 hf_cache = modal.Volume.from_name("dfk-classifier-cache", create_if_missing=True)
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.11")
+    modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "build-essential", "ninja-build")
     .pip_install(
-        "torch==2.4.1",
+        "torch==2.8.0",
         "transformers==5.9.0",
-        "bitsandbytes==0.44.1",
-        "accelerate==1.1.1",
+        "bitsandbytes",
+        "accelerate",
         "sentencepiece",
         "mistral_common",
         "huggingface_hub[hf_transfer]",
@@ -26,7 +26,7 @@ image = (
     )
     .env(
         {
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "HF_XET_HIGH_PERFORMANCE": "1",
             "HF_HOME": CACHE_DIR,
             "TRANSFORMERS_CACHE": CACHE_DIR,
         }
