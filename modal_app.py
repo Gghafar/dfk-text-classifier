@@ -70,6 +70,7 @@ class DFKClassifier:
         self.tokenizer = AutoTokenizer.from_pretrained(
             MODEL_ID,
             trust_remote_code=True,
+            use_fast=False,
             token=token,
             cache_dir=CACHE_DIR,
         )
@@ -123,7 +124,7 @@ class DFKClassifier:
         }
 
 
-@app.function(image=image, timeout=300)
+@app.function(image=image, timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 def classify(payload: dict[str, Any]) -> dict[str, Any]:
     text = payload.get("text", "").strip()
