@@ -4,7 +4,7 @@ import gradio as gr
 import requests
 
 # Set this to your Modal endpoint URL after deploying
-MODAL_ENDPOINT_URL = os.environ.get("MODAL_ENDPOINT_URL", "")
+MODAL_ENDPOINT_URL = os.environ.get("MODAL_ENDPOINT_URL", "https://gghafar--dfk-text-classifier-classify.modal.run")
 
 LABELS = ["Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"]
 
