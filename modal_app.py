@@ -15,11 +15,11 @@ image = (
     .apt_install("git", "build-essential", "ninja-build")
     .pip_install(
         "torch==2.4.1",
-        "transformers==4.46.3",
+        "transformers==5.9.0",
         "bitsandbytes==0.44.1",
         "accelerate==1.1.1",
         "sentencepiece",
-        "protobuf",
+        "mistral_common",
         "huggingface_hub[hf_transfer]",
         "fastapi[standard]",
         "peft",
@@ -70,7 +70,6 @@ class DFKClassifier:
         self.tokenizer = AutoTokenizer.from_pretrained(
             MODEL_ID,
             trust_remote_code=True,
-            use_fast=False,
             token=token,
             cache_dir=CACHE_DIR,
         )
