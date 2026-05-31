@@ -198,10 +198,7 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
     text = payload.get("text", "").strip()
     if not text:
         return {"error": "Field 'text' is required and cannot be empty."}
-    return DFKClassifier().classify.remote(
-        text=text,
-        max_new_tokens=int(payload.get("max_new_tokens", 20)),
-    )
+    return DFKClassifier().classify.remote(text=text)
 
 
 # ─── Warmup endpoint: GET /warmup → spin up GPU container ─────────────────────
