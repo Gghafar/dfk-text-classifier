@@ -15,24 +15,15 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub -q
+
       - name: Upload files to HF Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          pip install huggingface_hub -q
-          python3 - <<EOF
-import os
-from huggingface_hub import HfApi
-
-api = HfApi(token=os.environ["HF_TOKEN"])
-
-for filename in ["gradio_app.py", "requirements.txt"]:
-    api.upload_file(
-        path_or_fileobj=filename,
-        path_in_repo=filename,
-        repo_id="ggapar/DFK1-Text-Classify",
-        repo_type="space",
-        commit_message=f"sync: {filename} from GitHub Actions",
-    )
-    print(f"Uploaded {filename} to HF Space")
-EOF
+        run: python .github/scripts/upload_to_hf.py
