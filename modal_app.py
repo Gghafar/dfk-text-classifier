@@ -1,15 +1,23 @@
+"""
+modal_app.py — DFK Text Classification backend on Modal.com
+
+Deploy  : modal deploy modal_app.py
+Test    : modal run modal_app.py --text "Vaksin mengandung chip 5G"
+Logs    : modal app logs dfk-text-classifier
+"""
+
 import json
 import os
 from typing import Any
 
 import modal
 
-APP_NAME = "dfk-text-classifier"
-MODEL_ID = "aitf-komdigi/KomdigiITS-8B-DFK-TextClassification"
-CACHE_DIR = "/cache/huggingface"
+APP_NAME       = "dfk-text-classifier"
+MODEL_ID       = "aitf-komdigi/KomdigiITS-8B-DFK-TextClassification"
+CACHE_DIR      = "/cache/huggingface"
 MODEL_LOCAL_DIR = "/cache/dfk_model"
 
-app = modal.App(APP_NAME)
+app      = modal.App(APP_NAME)
 hf_cache = modal.Volume.from_name("dfk-classifier-cache", create_if_missing=True)
 
 image = (
@@ -46,26 +54,26 @@ SYSTEM_PROMPT = (
     "Jawab hanya dengan nama kategori, tanpa penjelasan tambahan."
 )
 
+VALID_LABELS = frozenset(["Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"])
 
-def _patch_configs(local_dir: str):
-    """Fix config mismatches caused by the model being saved with an incompatible model_type.
 
-    The model was saved with model_type='mistral3' which in transformers 5.x maps to the
-    vision-language Mistral3 model, not the text-only causal LM. Patching to 'mistral'
-    loads MistralForCausalLM which has the identical decoder architecture.
+def _patch_configs(local_dir: str) -> None:
+    """
+    Patch config.json dan tokenizer_config.json agar kompatibel dengan transformers 5.x.
+    - model_type 'mistral3' → 'mistral'  (mistral3 di transformers 5.x = vision-language model)
+    - tokenizer_class 'TokenizersBackend' → 'PreTrainedTokenizerFast'
     """
     config_path = os.path.join(local_dir, "config.json")
     if os.path.exists(config_path):
         with open(config_path) as f:
             cfg = json.load(f)
         if cfg.get("model_type") in ("mistral3", "ministral3"):
-            cfg["model_type"] = "mistral"
+            cfg["model_type"]    = "mistral"
             cfg["architectures"] = ["MistralForCausalLM"]
             with open(config_path, "w") as f:
                 json.dump(cfg, f, indent=2)
-            print("Patched config.json: model_type=mistral, architectures=[MistralForCausalLM]")
+            print("Patched config.json: model_type=mistral")
 
-    # tokenizer_config.json: "TokenizersBackend" is not a valid transformers class
     tok_path = os.path.join(local_dir, "tokenizer_config.json")
     if os.path.exists(tok_path):
         with open(tok_path) as f:
@@ -74,7 +82,7 @@ def _patch_configs(local_dir: str):
             tok["tokenizer_class"] = "PreTrainedTokenizerFast"
             with open(tok_path, "w") as f:
                 json.dump(tok, f, indent=2)
-            print("Patched tokenizer_config.json: TokenizersBackend -> PreTrainedTokenizerFast")
+            print("Patched tokenizer_config.json")
 
 
 @app.cls(
@@ -83,16 +91,19 @@ def _patch_configs(local_dir: str):
     cpu=4,
     memory=24 * 1024,
     timeout=900,
-    scaledown_window=60,
+    # FIX: dinaikkan dari 60s → 300s agar container tidak terlalu sering cold start
+    scaledown_window=300,
     volumes={CACHE_DIR: hf_cache},
     secrets=[modal.Secret.from_name("my-huggingface-secret")],
     enable_memory_snapshot=True,
 )
 @modal.concurrent(max_inputs=1)
 class DFKClassifier:
+
     @modal.enter(snap=True)
-    def load_to_cpu(self):
-        """Download model and load to CPU RAM — this state is snapshotted for fast future cold starts."""
+    def load_to_cpu(self) -> None:
+        """Download model ke cache volume dan load ke CPU RAM (di-snapshot)."""
+        import torch
         from huggingface_hub import snapshot_download
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -107,7 +118,6 @@ class DFKClassifier:
             )
             try:
                 hf_cache.commit()
-                print("Volume committed.")
             except Exception as e:
                 print(f"Volume commit warning (non-fatal): {e}")
 
@@ -118,57 +128,71 @@ class DFKClassifier:
             MODEL_LOCAL_DIR,
             trust_remote_code=True,
         )
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        print("Loading model to CPU ...")
+        print("Loading model to CPU RAM ...")
         self.model = AutoModelForCausalLM.from_pretrained(
             MODEL_LOCAL_DIR,
             trust_remote_code=True,
-            dtype="bfloat16",
+            # FIX: gunakan torch_dtype dengan import torch, bukan string "bfloat16"
+            torch_dtype=torch.bfloat16,
             device_map="cpu",
         )
         self.model.eval()
         print("Model in CPU RAM — snapshot will be taken.")
 
     @modal.enter(snap=False)
-    def move_to_gpu(self):
-        """Runs after every snapshot restore — moves model from CPU RAM to GPU VRAM."""
+    def move_to_gpu(self) -> None:
+        """Restore dari snapshot → pindahkan model dari CPU RAM ke GPU VRAM."""
         import torch
-        print("Moving model to GPU ...")
+        print("Moving model from CPU RAM to GPU VRAM ...")
         self.model = self.model.to("cuda", dtype=torch.bfloat16)
         print("Model ready on GPU.")
 
     @modal.method()
-    def classify(
-        self,
-        text: str,
-        max_new_tokens: int = 20,
-    ) -> dict[str, Any]:
+    def classify(self, text: str, max_new_tokens: int = 20) -> dict[str, Any]:
         import torch
 
+        # Format ChatML prompt secara manual (sesuai chat_template.jinja model)
         prompt = (
             f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
 
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2000,          # sisakan ruang untuk max_new_tokens
+        ).to(self.model.device)
 
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
         new_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
         raw_output = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+        # Bersihkan output: ambil baris pertama, hapus tag ChatML jika ada
         label = raw_output.split("\n")[0].split("<|im_end|>")[0].strip()
-        return {"label": label, "raw_output": raw_output}
+
+        return {
+            "label":      label,
+            "raw_output": raw_output,
+            "valid":      label in VALID_LABELS,
+        }
 
 
-@app.function(image=image, timeout=900)
+# ─── FastAPI endpoint (CPU function, dispatch ke GPU class) ───────────────────
+
+@app.function(image=image, timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 def classify(payload: dict[str, Any]) -> dict[str, Any]:
     text = payload.get("text", "").strip()
@@ -180,7 +204,25 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+# ─── Warmup endpoint: GET /warmup → spin up GPU container ─────────────────────
+
+@app.function(image=image, timeout=600)
+@modal.fastapi_endpoint(method="GET")
+def warmup() -> dict[str, str]:
+    """
+    Hit GET /warmup sebelum demo untuk pre-spin GPU container.
+    Gradio bisa memanggil ini saat pertama kali load Space.
+    """
+    result = DFKClassifier().classify.remote(
+        text="tes warmup",
+        max_new_tokens=5,
+    )
+    return {"status": "warm", "test_label": result.get("label", "?")}
+
+
+# ─── Local test entrypoint ────────────────────────────────────────────────────
+
 @app.local_entrypoint()
-def main(text: str = "Pemerintah telah berhasil menurunkan angka kemiskinan secara signifikan."):
+def main(text: str = "Vaksin COVID mengandung chip 5G untuk memantau warga."):
     result = DFKClassifier().classify.remote(text=text)
     print(result)
