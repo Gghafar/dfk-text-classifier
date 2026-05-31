@@ -6,6 +6,7 @@ on:
     paths:
       - "gradio_app.py"
       - "requirements.txt"
+  workflow_dispatch:
 
 jobs:
   sync-to-hf-space:
@@ -14,7 +15,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Upload gradio_app.py to HF Space
+      - name: Upload files to HF Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -33,5 +34,5 @@ for filename in ["gradio_app.py", "requirements.txt"]:
         repo_type="space",
         commit_message=f"sync: {filename} from GitHub Actions",
     )
-    print(f"✓ {filename} uploaded to HF Space")
+    print(f"Uploaded {filename} to HF Space")
 EOF
