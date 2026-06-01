@@ -1,4 +1,4 @@
-"""Upload gradio_app.py dan requirements.txt ke HuggingFace Space."""
+"""Upload files ke HuggingFace Space."""
 import os, sys
 from huggingface_hub import HfApi
 
@@ -6,14 +6,14 @@ token   = os.environ.get("HF_TOKEN")
 repo_id = "ggapar/DFK1-Text-Classify"
 
 if not token:
-    print("ERROR: HF_TOKEN env var tidak ditemukan.")
+    print("ERROR: HF_TOKEN tidak ditemukan.")
     sys.exit(1)
 
 api = HfApi(token=token)
 
-for filename in ["gradio_app.py", "requirements.txt"]:
+for filename in ["gradio_app.py", "requirements.txt", "README.md"]:
     if not os.path.exists(filename):
-        print(f"SKIP: {filename} tidak ditemukan di repo")
+        print(f"SKIP: {filename} tidak ada")
         continue
     api.upload_file(
         path_or_fileobj=filename,
@@ -22,6 +22,6 @@ for filename in ["gradio_app.py", "requirements.txt"]:
         repo_type="space",
         commit_message=f"sync: {filename} from GitHub Actions",
     )
-    print(f"OK: {filename} uploaded to {repo_id}")
+    print(f"OK: {filename} uploaded")
 
 print("Sync selesai.")
