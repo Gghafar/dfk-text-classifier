@@ -1,10 +1,4 @@
-"""
-DFK Text Classifier — GGUF CPU Edition
-Output: label + penalaran terstruktur (seperti contoh output asli model).
-"""
-
 import os
-import re
 import time
 
 import gradio as gr
@@ -15,16 +9,18 @@ GGUF_REPO     = os.environ.get("GGUF_REPO",     "ggapar/KomdigiITS-8B-DFK-GGUF")
 GGUF_FILENAME = os.environ.get("GGUF_FILENAME", "model-q4_k_m.gguf")
 HF_TOKEN      = os.environ.get("HF_TOKEN")
 
-SYSTEM_PROMPT = """Anda adalah sistem analisis konten yang mendeteksi disinformasi, fitnah, dan ujaran kebencian dalam teks bahasa Indonesia.
-
-Untuk setiap teks yang diberikan, berikan:
-1. Klasifikasi dalam satu dari lima kategori: Fakta, Disinformasi, Fitnah, Ujaran Kebencian, Non-DFK
-2. Penalaran terstruktur yang menjelaskan alasan klasifikasi secara rinci
-
-Format output WAJIB (gunakan tepat seperti ini):
-[LABEL] {nama kategori}
-[REASONING]
-{penjelasan terstruktur dengan poin-poin bernama, setiap poin menjelaskan indikator spesifik yang ditemukan dalam teks}"""
+SYSTEM_PROMPT = (
+    "Anda adalah sistem analisis konten yang mendeteksi disinformasi, fitnah, "
+    "dan ujaran kebencian dalam teks bahasa Indonesia. "
+    "Untuk setiap teks yang diberikan, berikan:\n"
+    "1. Klasifikasi dalam satu dari lima kategori: "
+    "Fakta, Disinformasi, Fitnah, Ujaran Kebencian, Non-DFK\n"
+    "2. Penalaran terstruktur yang menjelaskan alasan klasifikasi secara rinci\n\n"
+    "Format output WAJIB:\n"
+    "[LABEL] {nama kategori}\n"
+    "[REASONING]\n"
+    "{penjelasan terstruktur dengan poin-poin bernama}"
+)
 
 LABEL_COLORS = {
     "Fakta":            "#22c55e",
@@ -38,9 +34,9 @@ VALID_LABELS = set(LABEL_COLORS.keys())
 
 EXAMPLES = [
     ["Pemerintah Indonesia berhasil menurunkan angka kemiskinan menjadi 9% pada 2024."],
-    ["Vaksin COVID-19 mengandung chip 5G yang bisa dikendalikan dari jarak jauh oleh pemerintah asing."],
-    ["Si A adalah koruptor yang mencuri miliaran uang rakyat meskipun kasusnya belum diputus pengadilan."],
-    ["Semua warga suku X itu malas, tidak jujur, dan tidak layak dipercaya dalam pekerjaan apapun."],
+    ["Vaksin COVID-19 mengandung chip 5G yang bisa dikendalikan dari jarak jauh."],
+    ["Si A adalah koruptor yang mencuri miliaran uang rakyat meskipun belum terbukti."],
+    ["Semua warga suku X itu malas dan tidak bisa dipercaya dalam pekerjaan apapun."],
     ["Hari ini cuaca di Jakarta cukup panas dengan suhu mencapai 32 derajat Celsius."],
 ]
 
@@ -62,36 +58,36 @@ llm = Llama(
 )
 print("Model siap!")
 
+
 # ── parsing output ────────────────────────────────────────────────────────────
 
-def parse_output(raw: str) -> tuple[str, str]:
-    """Extract label dan reasoning dari output model."""
-    label     = "—"
+def parse_output(raw: str):
+    """Extract label dan reasoning — pakai splitlines, tidak ada regex kompleks."""
+    label = "—"
     reasoning = raw.strip()
+    lines = raw.strip().splitlines()
+    reasoning_start = 0
 
-    # Cari [LABEL] ...
-    m = re.search(r"\[LABEL\]\s*(.+?)(?:
-|$)", raw, re.IGNORECASE)
-    if m:
-        candidate = m.group(1).strip()
-        # Cocokkan dengan label valid (toleran terhadap variasi kapitalisasi)
-        for valid in VALID_LABELS:
-            if valid.lower() in candidate.lower():
-                label = valid
-                break
-        if label == "—":
-            label = candidate  # tetap tampilkan meski tidak persis cocok
+    for i, line in enumerate(lines):
+        if line.upper().strip().startswith("[LABEL]"):
+            candidate = line[len("[LABEL]"):].strip()
+            for valid in VALID_LABELS:
+                if valid.lower() in candidate.lower():
+                    label = valid
+                    break
+            if label == "—":
+                label = candidate
+            reasoning_start = i + 1
+            break
 
-    # Cari [REASONING] ...
-    m2 = re.search(r"\[REASONING\]\s*(.*)", raw, re.IGNORECASE | re.DOTALL)
-    if m2:
-        reasoning = m2.group(1).strip()
-    elif label != "—":
-        # Hapus baris [LABEL] dari reasoning jika tidak ada marker [REASONING]
-        reasoning = re.sub(r"\[LABEL\].*?(
-|$)", "", raw, flags=re.IGNORECASE).strip()
+    for i, line in enumerate(lines[reasoning_start:], start=reasoning_start):
+        if "[REASONING]" in line.upper():
+            reasoning = "\n".join(lines[i + 1:]).strip()
+            return label, reasoning
 
+    reasoning = "\n".join(lines[reasoning_start:]).strip()
     return label, reasoning
+
 
 # ── inference ────────────────────────────────────────────────────────────────
 
@@ -105,24 +101,26 @@ def classify_text(text: str):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": text.strip()},
         ],
-        max_tokens=768,        # cukup untuk reasoning panjang
-        temperature=0.1,       # sedikit variasi agar reasoning lebih natural
+        max_tokens=768,
+        temperature=0.1,
         repeat_penalty=1.1,
         stop=["<|im_end|>", "</s>"],
     )
     elapsed = time.time() - t0
 
-    raw            = response["choices"][0]["message"]["content"].strip()
+    raw = response["choices"][0]["message"]["content"].strip()
     label, reasoning = parse_output(raw)
 
     color = LABEL_COLORS.get(label, "#6b7280")
     badge = (
         f'<div style="padding:10px 20px;border-radius:8px;'
-        f'background:{color}22;border:1px solid {color}66;display:inline-block;margin-bottom:8px">'
+        f'background:{color}22;border:1px solid {color}66;'
+        f'display:inline-block;margin-bottom:8px">'
         f'<span style="color:{color};font-weight:600;font-size:1.1em">{label}</span></div>'
     )
-    status = f"✓ {elapsed:.1f}s · CPU (GGUF Q4)"
+    status = f"\u2713 {elapsed:.1f}s \u00b7 CPU (GGUF Q4)"
     return label, badge, reasoning, status
+
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 
@@ -133,18 +131,17 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
         Deteksi dan analisis **Disinformasi, Fitnah, dan Kebencian** dalam teks bahasa Indonesia.
 
         Model: [`aitf-komdigi/KomdigiITS-8B-DFK-TextClassification`](https://huggingface.co/aitf-komdigi/KomdigiITS-8B-DFK-TextClassification)
-        · Backend: **CPU (GGUF Q4_K_M, gratis)**
+        · Backend: **CPU (GGUF Q4\\_K\\_M, gratis)**
 
         | Label | Keterangan |
         |---|---|
         | **Fakta** | Informasi benar dan dapat diverifikasi |
         | **Disinformasi** | Informasi menyesatkan atau salah |
-        | **Fitnah** | Tuduhan tanpa dasar yang merusak reputasi |
+        | **Fitnah** | Tuduhan tanpa dasar |
         | **Ujaran Kebencian** | Konten menarget kelompok tertentu |
         | **Non-DFK** | Konten netral |
         """
     )
-
     with gr.Row():
         with gr.Column(scale=1):
             text_input = gr.Textbox(
@@ -155,19 +152,17 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
             with gr.Row():
                 submit_btn = gr.Button("Klasifikasikan", variant="primary", scale=3)
                 clear_btn  = gr.Button("Bersihkan", variant="secondary", scale=1)
-
         with gr.Column(scale=1):
-            label_out   = gr.Textbox(label="Label", interactive=False, max_lines=1)
-            badge_html  = gr.HTML()
-            status_out  = gr.Textbox(label="Status", interactive=False, max_lines=1)
+            label_out  = gr.Textbox(label="Label", interactive=False, max_lines=1)
+            badge_html = gr.HTML()
+            status_out = gr.Textbox(label="Status", interactive=False, max_lines=1)
 
     reasoning_out = gr.Textbox(
         label="Penalaran",
         interactive=False,
         lines=12,
-        placeholder="Penalaran model akan muncul di sini setelah klasifikasi ...",
+        placeholder="Penalaran model akan muncul di sini ...",
     )
-
     gr.Examples(examples=EXAMPLES, inputs=text_input, label="Contoh teks")
 
     submit_btn.click(
