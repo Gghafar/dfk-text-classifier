@@ -141,6 +141,20 @@ def classify_text(text: str, mode: str):
     return label, badge, reasoning, status
 
 
+
+
+# ── Dedicated API endpoint (hanya butuh text, mode=cepat default) ─────────────
+# Teman bisa panggil via: client.predict(text, api_name="/api_predict")
+
+def api_predict(text: str) -> dict:
+    """
+    Simple API endpoint untuk pemanggilan eksternal.
+    Input : text (str)
+    Output: dict dengan keys: label, status
+    """
+    label, _, _, status = classify_text(text, "Cepat (~30 detik) — Label saja")
+    return {"label": label, "status": status}
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 
 with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
@@ -206,6 +220,16 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
     clear_btn.click(
         lambda: ("", "—", "", "", ""),
         outputs=[text_input, label_out, badge_html, reasoning_out, status_out],
+    )
+
+    # ── Hidden API trigger (dipanggil via api_name='/api_predict') ─────────────
+    api_text_input = gr.Textbox(visible=False)
+    api_output     = gr.JSON(visible=False)
+    api_text_input.submit(
+        api_predict,
+        inputs=api_text_input,
+        outputs=api_output,
+        api_name="api_predict",
     )
 
 if __name__ == "__main__":
