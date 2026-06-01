@@ -6,3 +6,4 @@ accelerate
 sentencepiece
 huggingface_hub[hf_transfer]
 mistral_common>=1.5.2
+spaces
