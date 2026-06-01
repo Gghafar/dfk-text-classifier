@@ -209,4 +209,5 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
     )
 
 if __name__ == "__main__":
+    demo.queue(max_size=5)
     demo.launch()
