@@ -1,5 +1,5 @@
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 llama-cpp-python
 huggingface_hub
-pyaudioop
+audioop-lts
 pydub>=0.25.1
