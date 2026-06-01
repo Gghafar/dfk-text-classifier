@@ -41,21 +41,19 @@ VALID_LABELS = frozenset(["Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian",
 
 
 def _patch_configs(local_dir: str) -> None:
+    """Patch config.json dan tokenizer_config.json agar kompatibel dengan transformers 5.x."""
     config_path = os.path.join(local_dir, "config.json")
     if os.path.exists(config_path):
         with open(config_path) as f:
             cfg = json.load(f)
 
         changed = False
-
         if cfg.get("model_type") in ("mistral3", "ministral3"):
             cfg["model_type"]    = "mistral"
             cfg["architectures"] = ["MistralForCausalLM"]
             changed = True
-            print("Patched config.json: model_type=mistral")
+            print("Patched config.json: model_type -> mistral")
 
-        # Hapus generation_config nested — crash di transformers 5.x
-        # (AttributeError: dict has no to_dict)
         if "generation_config" in cfg:
             del cfg["generation_config"]
             changed = True
@@ -74,6 +72,35 @@ def _patch_configs(local_dir: str) -> None:
             with open(tok_path, "w") as f:
                 json.dump(tok, f, indent=2)
             print("Patched tokenizer_config.json")
+
+
+def _patch_generation_config_loader() -> None:
+    """
+    Monkey-patch GenerationConfig.from_model_config untuk handle bug transformers 5.x.
+
+    Root cause: Mistral3's config.json punya field 'generation_config' sebagai nested
+    dict. Transformers 5.x menyimpannya sebagai atribut di PretrainedConfig, lalu
+    from_model_config() mengekstrak dict itu dan mencoba memanggil .to_dict() — crash
+    karena dict tidak punya method itu.
+
+    Fix: intercept panggilan, jika yang diterima adalah dict, return GenerationConfig()
+    kosong (aman untuk inference) daripada crash.
+    """
+    from transformers import GenerationConfig
+
+    _original = GenerationConfig.from_model_config
+
+    def _safe_from_model_config(cls, model_config):
+        if isinstance(model_config, dict):
+            print(
+                "Warning: GenerationConfig.from_model_config received a dict "
+                "(transformers 5.x + Mistral3 config bug) — using empty GenerationConfig."
+            )
+            return GenerationConfig()
+        return _original(model_config)
+
+    GenerationConfig.from_model_config = classmethod(_safe_from_model_config)
+    print("Patched GenerationConfig.from_model_config (transformers 5.x compat)")
 
 
 @app.cls(
@@ -95,6 +122,9 @@ class DFKClassifier:
         import torch
         from huggingface_hub import snapshot_download
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        # Patch sebelum import/use transformers model loading
+        _patch_generation_config_loader()
 
         token = os.environ.get("HF_TOKEN")
 
@@ -121,7 +151,7 @@ class DFKClassifier:
             device_map="cpu",
         )
         self.model.eval()
-        print("Model in CPU RAM.")
+        print("Model in CPU RAM — snapshot will be taken.")
 
     @modal.enter(snap=False)
     def move_to_gpu(self) -> None:
