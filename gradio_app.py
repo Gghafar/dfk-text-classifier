@@ -1,8 +1,7 @@
 """
-DFK Text Classifier — Gradio Space
-Model di-load langsung di Space (tanpa Modal / external API).
-GPU: 4-bit NF4 quantization (~6 GB VRAM)
-CPU: float32 fallback (lambat, tidak direkomendasikan untuk 9B model)
+DFK Text Classifier — ZeroGPU Edition
+Menggunakan HuggingFace ZeroGPU (A100 gratis, tidak butuh kartu kredit).
+Model di-download dan di-patch saat startup, inference via @spaces.GPU.
 """
 
 import json
@@ -10,10 +9,9 @@ import os
 import time
 
 import gradio as gr
+import spaces
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-# ─── Config ──────────────────────────────────────────────────────────────────
 
 MODEL_ID  = "aitf-komdigi/KomdigiITS-8B-DFK-TextClassification"
 HF_TOKEN  = os.environ.get("HF_TOKEN")
@@ -38,27 +36,24 @@ LABEL_COLORS = {
 EXAMPLES = [
     ["Pemerintah Indonesia berhasil menurunkan angka kemiskinan menjadi 9% pada 2024."],
     ["Vaksin COVID-19 mengandung chip 5G yang bisa dikendalikan dari jarak jauh."],
-    ["Si A adalah koruptor yang mencuri uang rakyat meskipun belum terbukti di pengadilan."],
+    ["Si A adalah koruptor meskipun belum terbukti di pengadilan."],
     ["Semua orang dari suku X itu malas dan tidak bisa dipercaya."],
-    ["Hari ini cuaca di Jakarta cukup panas dengan suhu mencapai 32 derajat Celsius."],
+    ["Hari ini cuaca di Jakarta cukup panas dengan suhu 32 derajat Celsius."],
 ]
 
-# ─── Patch config ─────────────────────────────────────────────────────────────
+# ── patch configs ───────────────────────────────────────────────────────────
 
 def patch_configs(model_dir: str) -> None:
-    """Fix config.json dan tokenizer_config.json agar kompatibel dengan transformers."""
     config_path = os.path.join(model_dir, "config.json")
     if os.path.exists(config_path):
         with open(config_path) as f:
             cfg = json.load(f)
         changed = False
-        # mistral3 → mistral (transformers mengenali ini sebagai vision-language model)
         if cfg.get("model_type") in ("mistral3", "ministral3"):
             cfg["model_type"]    = "mistral"
             cfg["architectures"] = ["MistralForCausalLM"]
             changed = True
             print("Patched config.json: model_type -> mistral")
-        # Hapus nested generation_config (crash di transformers 4.x/5.x jika model type diganti)
         if "generation_config" in cfg:
             del cfg["generation_config"]
             changed = True
@@ -77,80 +72,62 @@ def patch_configs(model_dir: str) -> None:
                 json.dump(tok, f, indent=2)
             print("Patched tokenizer_config.json")
 
+# ── download model at startup (CPU, no GPU needed) ──────────────────────────
 
-# ─── Model loading ────────────────────────────────────────────────────────────
+print("Checking model cache ...")
+if not os.path.exists(os.path.join(LOCAL_DIR, "config.json")):
+    from huggingface_hub import snapshot_download
+    print(f"Downloading {MODEL_ID} (~35 GB, sekali saja) ...")
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=LOCAL_DIR,
+        local_dir_use_symlinks=False,
+        token=HF_TOKEN,
+    )
+    print("Download selesai.")
 
-def load_model():
-    if not os.path.exists(os.path.join(LOCAL_DIR, "config.json")):
-        from huggingface_hub import snapshot_download
-        print(f"Downloading {MODEL_ID} ...")
-        snapshot_download(
-            repo_id=MODEL_ID,
-            local_dir=LOCAL_DIR,
-            local_dir_use_symlinks=False,   # actual files, bukan symlink (agar bisa di-patch)
-            token=HF_TOKEN,
-        )
-        print("Download selesai.")
+patch_configs(LOCAL_DIR)
 
-    patch_configs(LOCAL_DIR)
+print("Loading tokenizer ...")
+tokenizer = AutoTokenizer.from_pretrained(LOCAL_DIR, trust_remote_code=True)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    print("Loading tokenizer ...")
-    tok = AutoTokenizer.from_pretrained(LOCAL_DIR, trust_remote_code=True)
-    if tok.pad_token_id is None:
-        tok.pad_token_id = tok.eos_token_id
+# ── model: lazy load di dalam @spaces.GPU ──────────────────────────────────
+model = None
 
-    use_gpu = torch.cuda.is_available()
-    if use_gpu:
-        gpu_name = torch.cuda.get_device_name(0)
-        vram_gb  = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"GPU detected: {gpu_name} ({vram_gb:.1f} GB)")
-        print("Loading model — 4-bit NF4 quantization ...")
-        mdl = AutoModelForCausalLM.from_pretrained(
-            LOCAL_DIR,
-            quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-            ),
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    else:
-        print("Tidak ada GPU — loading ke CPU (lambat untuk 9B model) ...")
-        mdl = AutoModelForCausalLM.from_pretrained(
-            LOCAL_DIR,
-            torch_dtype=torch.float32,
-            device_map="cpu",
-            trust_remote_code=True,
-        )
+def _load_model_to_gpu():
+    global model
+    if model is not None:
+        return
+    print("Loading model ke GPU (4-bit NF4) ...")
+    model = AutoModelForCausalLM.from_pretrained(
+        LOCAL_DIR,
+        quantization_config=BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        ),
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    model.eval()
+    print("Model siap di GPU.")
 
-    mdl.eval()
-    print("Model siap!")
-    return mdl, tok, use_gpu
+# ── inference ────────────────────────────────────────────────────────────────
 
-
-print("=" * 50)
-print("Memuat model DFK Classifier ...")
-print("=" * 50)
-model, tokenizer, HAS_GPU = load_model()
-
-
-# ─── Inference ────────────────────────────────────────────────────────────────
-
+@spaces.GPU(duration=120)
 def classify_text(text: str):
     if not text.strip():
         return "—", "", ""
 
+    _load_model_to_gpu()
+
     prompt = (
-        f"<|im_start|>system
-{SYSTEM_PROMPT}<|im_end|>
-"
-        f"<|im_start|>user
-{text.strip()}<|im_end|>
-"
-        f"<|im_start|>assistant
-"
+        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>user\n{text.strip()}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
     )
 
     enc = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2000)
@@ -177,13 +154,10 @@ def classify_text(text: str):
         f'background:{color}22;border:1px solid {color}66;display:inline-block">'
         f'<span style="color:{color};font-weight:600;font-size:1.15em">{label}</span></div>'
     )
-    device = "GPU" if HAS_GPU else "CPU"
-    status = f"✓ {elapsed:.1f}s · {device}"
-
+    status = f"✓ {elapsed:.1f}s · ZeroGPU A100"
     return label, badge, status
 
-
-# ─── UI ──────────────────────────────────────────────────────────────────────
+# ── UI ───────────────────────────────────────────────────────────────────────
 
 with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
     gr.Markdown(
@@ -192,14 +166,18 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
         Deteksi **Disinformasi, Fitnah, dan Kebencian** dalam teks bahasa Indonesia.
 
         Model: [`aitf-komdigi/KomdigiITS-8B-DFK-TextClassification`](https://huggingface.co/aitf-komdigi/KomdigiITS-8B-DFK-TextClassification)
+        · Backend: **ZeroGPU (A100)**
 
         | Label | Keterangan |
         |---|---|
         | **Fakta** | Informasi benar dan dapat diverifikasi |
         | **Disinformasi** | Informasi menyesatkan atau salah |
-        | **Fitnah** | Tuduhan tanpa dasar yang merusak reputasi |
+        | **Fitnah** | Tuduhan tanpa dasar |
         | **Ujaran Kebencian** | Konten menarget kelompok tertentu |
         | **Non-DFK** | Konten netral |
+
+        > Permintaan pertama membutuhkan ~60 detik (model loading ke GPU).
+        > Permintaan berikutnya jauh lebih cepat.
         """
     )
 
@@ -207,8 +185,8 @@ with gr.Blocks(title="DFK Text Classifier", theme=gr.themes.Soft()) as demo:
         with gr.Column(scale=2):
             text_input = gr.Textbox(
                 label="Teks yang akan diklasifikasikan",
-                placeholder="Masukkan teks bahasa Indonesia di sini...",
-                lines=6,
+                placeholder="Masukkan teks bahasa Indonesia ...",
+                lines=5,
             )
             with gr.Row():
                 submit_btn = gr.Button("Klasifikasikan", variant="primary")
