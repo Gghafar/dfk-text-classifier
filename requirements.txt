@@ -1,2 +1,8 @@
 gradio>=4.0.0
-requests
+transformers==4.46.0
+torch
+bitsandbytes
+accelerate
+sentencepiece
+huggingface_hub[hf_transfer]
+mistral_common>=1.5.2
