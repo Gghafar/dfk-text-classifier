@@ -1,4 +1,1 @@
---extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-llama-cpp-python
-audioop-lts
-pydub>=0.25.1
+modal>=1.0.0
