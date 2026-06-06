@@ -89,7 +89,7 @@ pre{background:#f1f5f9;padding:14px;border-radius:8px;overflow-x:auto}
 a{color:#2563eb}</style></head><body>
 <h2>DFK Text Classification &amp; Summarization API</h2>
 <p><b>Model:</b> aitf-komdigi/KomdigiITS-8B-DFK-TextClassification</p>
-<p><b>Backend:</b> Unsloth &mdash; <b>GPU:</b> L4 24GB (bfloat16)</p>
+<p><b>Backend:</b> Unsloth &mdash; <b>GPU:</b> A100 40GB (bfloat16)</p>
 <h3>POST /classify</h3>
 <pre>{{
   "ringkasan": "Summary of the social media post",
@@ -223,7 +223,7 @@ def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
 
 @app.cls(
     image=image,
-    gpu="L4",
+    gpu="A100",
     cpu=4,
     memory=24 * 1024,
     timeout=600,
