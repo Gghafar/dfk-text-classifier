@@ -2,8 +2,8 @@
 DFK Text Classification & Summarization — Modal GPU Inference Endpoint (v3)
 =============================================================================
 Model    : aitf-komdigi/KomdigiITS-8B-DFK-TextClassification
-Backend  : Unsloth FastLanguageModel (4-bit)
-GPU      : L4 (24 GB VRAM)
+Backend  : Unsloth FastLanguageModel (bfloat16, full size)
+GPU      : A100 40GB
 Endpoints: GET  /          → info page
            POST /classify  → structured input (ringkasan, klaim, fakta, ...)
            POST /summarize → { "text": "...", "temperature": 0.3 }
@@ -88,16 +88,17 @@ INFO_HTML = """<!DOCTYPE html><html><head><title>DFK API v3</title>
 pre{background:#f1f5f9;padding:14px;border-radius:8px;overflow-x:auto}
 a{color:#2563eb}</style></head><body>
 <h2>DFK Text Classification &amp; Summarization API</h2>
-<p><b>Model:</b> aitf-komdigi/KomdigiITS-8B-DFK-TextClassification</p>
-<p><b>Backend:</b> Unsloth &mdash; <b>GPU:</b> A100 40GB (bfloat16)</p>
+<p><b>Model:</b> aitf-komdigi/KomdigiITS-8B-DFK-TextClassification (bfloat16)</p>
+<p><b>Backend:</b> Unsloth &mdash; <b>GPU:</b> A100 40GB</p>
 <h3>POST /classify</h3>
 <pre>{{
   "ringkasan": "Summary of the social media post",
   "klaim": "Claim made in the post",
   "fakta": "Verified fact for comparison",
   "image_url": "https://...",
-  "max_new_tokens": 128,
-  "temperature": 0.0
+  "max_new_tokens": 512,
+  "temperature": 0.0,
+  "num_trials": 3
 }}</pre>
 <h3>POST /summarize</h3>
 <pre>{{
@@ -115,7 +116,7 @@ class ClassifyRequest(BaseModel):
     klaim:          str             = Field(..., description="Claim made in the post")
     fakta:          str             = Field(..., description="Verified fact for comparison")
     image_url:      Optional[str]   = Field(None, description="Optional image URL for visual context")
-    max_new_tokens: Optional[int]   = Field(128, ge=32, le=1024)
+    max_new_tokens: Optional[int]   = Field(512, ge=32, le=2048)
     temperature:    Optional[float] = Field(0.0, ge=0.0, le=1.0)
     num_trials:     Optional[int]   = Field(3, ge=1, le=10)
 
@@ -178,7 +179,7 @@ def _sanitize_body(raw: bytes) -> bytes:
 # ── Pure helpers ──────────────────────────────────────────────────────────────
 
 def _parse_output(raw: str):
-    label, confidence, reasoning = "—", "—", ""
+    label, reasoning = "—", ""
     clean = raw.split("<|im_end|>")[0].split("<|im_start|>")[0].split("</s>")[0].strip()
     lines = clean.splitlines()
     reasoning_start = 0
@@ -192,19 +193,16 @@ def _parse_output(raw: str):
                     label = v; break
             if label == "—":
                 label = candidate
-        elif lc.upper().startswith("[CONFIDENCE]"):
-            confidence = lc[len("[CONFIDENCE]"):].strip()
         elif lc.upper().startswith("[REASONING]"):
             reasoning_start = i + 1; break
 
     if label == "—":
-        cl = clean.lower()
         for v in VALID_LABELS:
-            if v.lower() in cl:
+            if v.lower() in clean.lower():
                 label = v; break
 
     reasoning = "\n".join(lines[reasoning_start:]).strip() if reasoning_start else clean
-    return label, confidence, reasoning
+    return label, reasoning
 
 
 def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
@@ -225,7 +223,7 @@ def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
     image=image,
     gpu="A100",
     cpu=4,
-    memory=24 * 1024,
+    memory=32 * 1024,
     timeout=600,
     volumes={CACHE_DIR: hf_cache},
     scaledown_window=300,
@@ -235,9 +233,6 @@ class DFKModel:
 
     @modal.enter(snap=True)
     def load_model(self):
-        # Only load weights here — this is snapshotted for fast restore.
-        # Do NOT build the FastAPI app here; endpoint closures must be rebuilt
-        # fresh on every cold start so code changes take effect immediately.
         from unsloth import FastLanguageModel
 
         token = os.environ.get("HF_TOKEN")
@@ -251,7 +246,6 @@ class DFKModel:
 
     @modal.enter()
     def build_app(self):
-        # Runs after snapshot restore — always uses latest code.
         self._app = self._build_app()
 
     def _build_prompt(self, system: str, user_text: str) -> str:
@@ -283,10 +277,8 @@ class DFKModel:
 
         @web.get("/", response_class=HTMLResponse)
         def index(request: Request):
-            base = str(request.base_url).rstrip("/")
-            return INFO_HTML.replace("{base_url}", base)
+            return INFO_HTML.replace("{base_url}", str(request.base_url).rstrip("/"))
 
-        # ── POST /classify ────────────────────────────────────────────────────
         @web.post("/classify", response_model=ClassifyResponse)
         def classify(body: ClassifyRequest):
             import torch
@@ -297,19 +289,18 @@ class DFKModel:
             klaim       = (body.klaim or "").strip()
             fakta       = (body.fakta or "").strip()
             temperature = float(body.temperature if body.temperature is not None else 0.0)
-            max_tokens  = int(body.max_new_tokens or 128)
+            max_tokens  = int(body.max_new_tokens or 512)
 
             if not ringkasan or not klaim or not fakta:
                 raise HTTPException(status_code=400, detail="ringkasan, klaim, dan fakta tidak boleh kosong.")
 
             user_msg = f"Ringkasan: {ringkasan}\nKlaim: {klaim}\nFakta: {fakta}"
-            if body.image_url:
+            if body.image_url and body.image_url not in ("string", ""):
                 user_msg += f"\nImage URL: {body.image_url}"
 
             prompt = self._build_prompt(CLASSIFY_SYSTEM, user_msg)
 
             num_trials = max(1, min(body.num_trials or 3, 10))
-            # Greedy (temp=0) with multiple trials produces identical outputs — use 0.3 instead
             if temperature == 0.0 and num_trials > 1:
                 temperature = 0.3
             do_sample = num_trials > 1 or temperature > 0.0
@@ -355,7 +346,7 @@ class DFKModel:
                 gen_text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
                 scores_i = [s[i:i+1] for s in out.scores]
                 conf     = _mtla_confidence(scores_i, gen_ids, K=10)
-                label, _, reasoning = _parse_output(gen_text)
+                label, reasoning = _parse_output(gen_text)
                 trials.append({"label": label, "reasoning": reasoning, "confidence": conf})
 
             vote              = Counter(t["label"] for t in trials)
@@ -385,7 +376,6 @@ class DFKModel:
                 ],
             )
 
-        # ── POST /summarize ───────────────────────────────────────────────────
         @web.post("/summarize", response_model=SummarizeResponse)
         def summarize(body: SummarizeRequest):
             import torch
@@ -407,8 +397,8 @@ class DFKModel:
                 add_special_tokens=False,
             ).to(device)
 
-            pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-            eos_id = self.tokenizer.eos_token_id
+            pad_id    = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+            eos_id    = self.tokenizer.eos_token_id
             input_len = inputs["input_ids"].shape[1]
 
             with torch.inference_mode():
