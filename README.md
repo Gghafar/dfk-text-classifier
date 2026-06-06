@@ -124,7 +124,7 @@ modal app logs dfk-text-classification-v3
 
 | Component | Description |
 |-----------|-------------|
-| `DFKModel` | Modal class on L4 GPU. Loads model via `@modal.enter(snap=True)`, builds FastAPI routes via `@modal.enter()` (always fresh, never stale from snapshot). |
+| `DFKModel` | Modal class on H100 GPU. Loads model via `@modal.enter(snap=True)`, builds FastAPI routes via `@modal.enter()` (always fresh, never stale from snapshot). |
 | `POST /classify` | Structured DFK classification with MTLA multi-trial voting. |
 | `POST /summarize` | Indonesian text summarization using a summarization system prompt. |
 | `_mtla_confidence` | Computes logit-based confidence score from first K generated token probabilities. |
@@ -142,15 +142,15 @@ modal app logs dfk-text-classification-v3
 | `max_new_tokens` | 128 | Maximum tokens to generate |
 | `temperature` | 0.0 | `0` = greedy (single trial). `> 0` = sampling with MTLA voting |
 | `num_trials` | 3 | Number of parallel generation trials for majority voting |
-| `repetition_penalty` | 1.05 | Penalizes repeated tokens (hardcoded) |
+| `repetition_penalty` | 1.15 | Penalizes repeated tokens (hardcoded) |
 
 ## Infrastructure
 
 | Setting | Value |
 |---------|-------|
-| GPU | NVIDIA L4 (24 GB VRAM) |
+| GPU | NVIDIA H100 (80 GB VRAM) |
 | CPU | 4 vCPU |
-| Memory | 24 GB RAM |
+| Memory | 32 GB RAM |
 | Timeout | 600s |
 | Scale-down | 300s idle |
 | Precision | bfloat16 (full size, no quantization) |
