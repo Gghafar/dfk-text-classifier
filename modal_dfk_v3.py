@@ -3,7 +3,7 @@ DFK Text Classification & Summarization — Modal GPU Inference Endpoint (v3)
 =============================================================================
 Model    : aitf-komdigi/KomdigiITS-8B-DFK-TextClassification
 Backend  : Unsloth FastLanguageModel (bfloat16, full size)
-GPU      : A100 40GB
+GPU      : H100
 Endpoints: GET  /          → info page
            POST /classify  → structured input (ringkasan, klaim, fakta, ...)
            POST /summarize → { "text": "...", "temperature": 0.3 }
@@ -227,11 +227,10 @@ def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
     timeout=600,
     volumes={CACHE_DIR: hf_cache},
     scaledown_window=300,
-    enable_memory_snapshot=True,
 )
 class DFKModel:
 
-    @modal.enter(snap=True)
+    @modal.enter()
     def load_model(self):
         from unsloth import FastLanguageModel
 
