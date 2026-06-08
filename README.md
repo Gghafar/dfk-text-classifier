@@ -7,10 +7,9 @@ The model classifies content into DFK categories (Disinformasi, Fitnah, Kebencia
 ## Features
 
 - **DFK classification** — detects disinformation, slander, and hate speech from structured social media post metadata
-- **Summarization mode** — summarizes Indonesian text using the base model's general capability (no classification bias)
+- **Summarization mode** — summarizes Indonesian text with a dedicated summarization prompt
 - **Multi-trial MTLA voting** — runs N generation trials, scores each via logit-based confidence (K=10 tokens), then majority-votes the result
 - **Greedy mode** — `temperature: 0` with single trial for fastest deterministic inference
-- **CPU memory snapshot** — model weights snapshotted after first load for faster cold start on subsequent requests
 - **JSON sanitizer** — middleware that fixes copy-pasted text containing literal newline characters inside JSON strings
 
 ## Setup
@@ -41,11 +40,26 @@ modal deploy modal_dfk_v3.py
 modal app logs dfk-text-classification-v3
 ```
 
-## API
+## API Endpoints
 
-**Endpoint:** `POST https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run`
+**Base URL:** `https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run`
+
+**Swagger UI:** `https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/docs`
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Basic API information page |
+| `GET` | `/docs` | Interactive Swagger UI |
+| `POST` | `/classify` | DFK classification from structured claim/fact input |
+| `POST` | `/summarize` | Indonesian text summarization |
 
 ### DFK Classification
+
+**Endpoint:** `POST /classify`
+
+**Full URL:** `https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/classify`
+
+**Request:**
 
 ```json
 {
@@ -57,6 +71,20 @@ modal app logs dfk-text-classification-v3
   "temperature": 0.0,
   "num_trials": 3
 }
+```
+
+**Example curl:**
+```bash
+curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/classify" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ringkasan": "Vaksin COVID-19 diklaim mengandung chip mikro",
+    "klaim": "Vaksin mengandung chip untuk memata-matai warga negara",
+    "fakta": "WHO dan Kemenkes menyatakan vaksin tidak mengandung chip apapun",
+    "max_new_tokens": 256,
+    "temperature": 0.0,
+    "num_trials": 1
+  }'
 ```
 
 **Response:**
@@ -80,11 +108,27 @@ modal app logs dfk-text-classification-v3
 
 ### Summarization
 
+**Endpoint:** `POST /summarize`
+
+**Full URL:** `https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/summarize`
+
+**Request:**
+
 ```json
 {
   "text": "Teks yang ingin diringkas...",
   "temperature": 0.3
 }
+```
+
+**Example curl:**
+```bash
+curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/summarize" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Pemerintah Indonesia mengesahkan regulasi baru tentang penggunaan kecerdasan buatan di sektor publik.",
+    "temperature": 0.3
+  }'
 ```
 
 **Response:**
@@ -104,9 +148,16 @@ modal app logs dfk-text-classification-v3
 | `klaim` | string | yes | — | The specific claim or statement to classify |
 | `fakta` | string | yes | — | Verified fact(s) to compare the claim against |
 | `image_url` | string | no | null | Optional image URL for additional context |
-| `max_new_tokens` | int | no | 128 | Max tokens to generate (32–1024) |
+| `max_new_tokens` | int | no | 512 | Max tokens to generate (32–2048) |
 | `temperature` | float | no | 0.0 | Sampling temperature. `0` = greedy. If `> 0` and `num_trials > 1`, enables MTLA voting |
 | `num_trials` | int | no | 3 | Number of generation trials for voting (1–10). Auto-raises temperature to `0.3` when `temperature: 0` and `num_trials > 1` |
+
+### Summarization Input Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `text` | string | yes | — | Indonesian text to summarize |
+| `temperature` | float | no | 0.3 | Sampling temperature for summary generation |
 
 ### DFK Labels
 
@@ -124,7 +175,7 @@ modal app logs dfk-text-classification-v3
 
 | Component | Description |
 |-----------|-------------|
-| `DFKModel` | Modal class on H100 GPU. Loads model via `@modal.enter(snap=True)`, builds FastAPI routes via `@modal.enter()` (always fresh, never stale from snapshot). |
+| `DFKModel` | Modal class on H100 GPU. Loads the model via `@modal.enter()` and serves FastAPI routes through `@modal.asgi_app()`. |
 | `POST /classify` | Structured DFK classification with MTLA multi-trial voting. |
 | `POST /summarize` | Indonesian text summarization using a summarization system prompt. |
 | `_mtla_confidence` | Computes logit-based confidence score from first K generated token probabilities. |
@@ -132,14 +183,18 @@ modal app logs dfk-text-classification-v3
 | HF Volume cache | `modal.Volume` named `dfk-8b-cache` persists downloaded weights across cold starts. |
 
 **Model loading flow:**
-1. `snap=True` — downloads weights (cached in Volume), loads model + tokenizer via Unsloth `FastLanguageModel.from_pretrained` in bfloat16 → **snapshot taken**
-2. `snap=False` (default `@modal.enter`) — rebuilds FastAPI app with fresh endpoint handlers so code changes take effect immediately after every redeploy
+1. Modal starts an H100 container.
+2. `@modal.enter()` loads model + tokenizer via Unsloth `FastLanguageModel.from_pretrained` in full bfloat16.
+3. `FastLanguageModel.for_inference(...)` applies Unsloth inference optimizations.
+4. FastAPI routes are built and served through `@modal.asgi_app()`.
+
+Memory snapshots are intentionally disabled because Unsloth checks for a visible GPU during import. Modal CPU snapshot initialization does not expose the GPU, which causes Unsloth startup failures.
 
 ## Generation Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `max_new_tokens` | 128 | Maximum tokens to generate |
+| `max_new_tokens` | 512 | Maximum tokens to generate for classification |
 | `temperature` | 0.0 | `0` = greedy (single trial). `> 0` = sampling with MTLA voting |
 | `num_trials` | 3 | Number of parallel generation trials for majority voting |
 | `repetition_penalty` | 1.15 | Penalizes repeated tokens (hardcoded) |
@@ -154,6 +209,6 @@ modal app logs dfk-text-classification-v3
 | Timeout | 600s |
 | Scale-down | 300s idle |
 | Precision | bfloat16 (full size, no quantization) |
-| Snapshot | CPU memory snapshot enabled |
+| Snapshot | Disabled for Unsloth GPU startup compatibility |
 | Model | aitf-komdigi/KomdigiITS-8B-DFK-TextClassification |
 | Parameters | 8.9B |
