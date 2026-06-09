@@ -197,6 +197,41 @@ Memory snapshots are intentionally disabled because Unsloth checks for a visible
 | `num_trials` | 3 | Number of parallel generation trials for majority voting |
 | `repetition_penalty` | 1.15 | Penalizes repeated tokens (hardcoded) |
 
+## API Call Logging
+
+Every successful `/classify` and `/summarize` call is appended as one JSON object per line in the Modal Volume:
+
+```text
+dfk-8b-cache:/api_logs/api_calls.jsonl
+```
+
+Each record contains:
+
+| Field | Description |
+|-------|-------------|
+| `request_id` | Server-generated UUID for the API call |
+| `timestamp` | Server-generated UTC timestamp |
+| `endpoint` | `/classify` or `/summarize` |
+| `status` | `success` or `error` |
+| `latency_ms` | End-to-end endpoint latency in milliseconds |
+| `input` | Parsed request body sent by the user |
+| `output` | Response body returned by the API |
+| `error` | Error message, if logged |
+
+Download the live API logs:
+
+```bash
+modal volume get dfk-8b-cache api_logs/api_calls.jsonl ./api_calls.jsonl --force
+```
+
+A metadata-only historical backfill from Modal logs is also stored at:
+
+```text
+dfk-8b-cache:/api_logs/backfill_modal_metadata_last_7d.jsonl
+```
+
+That backfill includes endpoint, timestamp, status, duration, and execution time from Modal logs. It does not include historical request bodies or model outputs because those were not logged before JSONL logging was added.
+
 ## Infrastructure
 
 | Setting | Value |
