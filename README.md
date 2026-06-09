@@ -11,7 +11,7 @@ The model classifies content into DFK categories (Disinformasi, Fitnah, Kebencia
 - **Summarization mode** — summarizes Indonesian text with a dedicated summarization prompt and response cleanup
 - **Multi-trial MTLA voting** — runs N generation trials, scores each via logit-based confidence (K=10 tokens), then majority-votes the result
 - **Greedy mode** — `temperature: 0` with single trial for fastest deterministic inference
-- **Weave-style JSONL logs** — stores API calls in a Modal Volume using the same top-level trace shape as the exported W&B Weave JSONL
+- **W&B Weave logging** — sends API calls to W&B Weave Traces with the same input columns as the reference view, while keeping JSONL backup logs in Modal
 - **JSON sanitizer** — middleware that fixes copy-pasted text containing literal newline characters inside JSON strings
 
 ## Setup
@@ -28,6 +28,12 @@ modal secret create huggingface-secret HF_TOKEN=hf_your_token_here
 ```
 
 Then add `secrets=[modal.Secret.from_name("huggingface-secret")]` to `@app.cls(...)` in `modal_dfk_v3.py`.
+
+Create the W&B secret used by the deployed logger:
+
+```bash
+modal secret create wandb-secret WANDB_API_KEY=wandb_your_key_here
+```
 
 ## Commands
 
@@ -204,7 +210,22 @@ Memory snapshots are intentionally disabled because Unsloth checks for a visible
 
 ## API Call Logging
 
-Every `/classify` and `/summarize` call is appended as one JSON object per line in the Modal Volume:
+Every `/classify` and `/summarize` call is sent to W&B Weave Traces for:
+
+```text
+ghafaradi-its/ministral-cpt
+```
+
+The trace `inputs` object uses the same columns visible in the Weave trace table:
+
+```text
+mode, image, image_preview, ringkasan, klaim, fakta, prompt, dfk_prompt,
+caption_prompt, model_prompt, messages_input, max_new_tokens, temperature
+```
+
+The trace `output` object contains the generated text, token count, elapsed timing, and the API response payload.
+
+Local backup logs are also appended as one JSON object per line in the Modal Volume:
 
 ```text
 dfk-8b-cache:/api_logs/api_calls.jsonl
@@ -223,13 +244,6 @@ id, project_id, op_name, display_name, trace_id, parent_id, thread_id,
 turn_id, started_at, attributes, inputs, ended_at, exception, output,
 summary, wb_user_id, wb_run_id, wb_run_step, wb_run_step_end, deleted_at,
 expire_at, storage_size_bytes, total_storage_size_bytes
-```
-
-The `inputs` object uses the same columns visible in the Weave trace table:
-
-```text
-mode, image, image_preview, ringkasan, klaim, fakta, prompt, dfk_prompt,
-caption_prompt, model_prompt, messages_input, max_new_tokens, temperature
 ```
 
 Each record contains:
