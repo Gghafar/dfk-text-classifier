@@ -1,15 +1,17 @@
 # dfk-text-classifier
 
-A [Modal](https://modal.com) deployment of [`aitf-komdigi/KomdigiITS-8B-DFK-TextClassification`](https://huggingface.co/aitf-komdigi/KomdigiITS-8B-DFK-TextClassification) — a fine-tuned 8.9B Mistral3 model served as a GPU-backed FastAPI endpoint for Indonesian social media content analysis.
+A [Modal](https://modal.com) deployment of [`hnuka/BEST-Ministral-8B-DFK-Final`](https://huggingface.co/hnuka/BEST-Ministral-8B-DFK-Final) — a merged/full 8B Mistral3 DFK model served as a GPU-backed FastAPI endpoint for Indonesian social media content analysis.
 
 The model classifies content into DFK categories (Disinformasi, Fitnah, Kebencian) and can also summarize text in Bahasa Indonesia.
 
 ## Features
 
-- **DFK classification** — detects disinformation, slander, and hate speech from a claim; optional summary/fact fields can improve context
-- **Summarization mode** — summarizes Indonesian text with a dedicated summarization prompt
+- **DFK classification** — detects disinformation, slander, and hate speech from a claim; only `klaim` is required
+- **Optional context** — `ringkasan` and `fakta` are optional; unrelated `fakta` is ignored before the prompt is sent to the model
+- **Summarization mode** — summarizes Indonesian text with a dedicated summarization prompt and response cleanup
 - **Multi-trial MTLA voting** — runs N generation trials, scores each via logit-based confidence (K=10 tokens), then majority-votes the result
 - **Greedy mode** — `temperature: 0` with single trial for fastest deterministic inference
+- **Weave-style JSONL logs** — stores API calls in a Modal Volume using the same top-level trace shape as the exported W&B Weave JSONL
 - **JSON sanitizer** — middleware that fixes copy-pasted text containing literal newline characters inside JSON strings
 
 ## Setup
@@ -115,7 +117,7 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 ```json
 {
   "text": "Teks yang ingin diringkas...",
-  "temperature": 0.3
+  "temperature": 0.0
 }
 ```
 
@@ -125,7 +127,7 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
   -H "Content-Type: application/json" \
   -d '{
     "text": "Pemerintah Indonesia mengesahkan regulasi baru tentang penggunaan kecerdasan buatan di sektor publik.",
-    "temperature": 0.3
+    "temperature": 0.0
   }'
 ```
 
@@ -155,7 +157,7 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `text` | string | yes | — | Indonesian text to summarize |
-| `temperature` | float | no | 0.3 | Sampling temperature for summary generation |
+| `temperature` | float | no | 0.0 | Sampling temperature for summary generation. `0` uses deterministic generation |
 
 ### DFK Labels
 
@@ -165,6 +167,7 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 | `Disinformasi` | Misleading or inaccurate information |
 | `Fitnah` | Serious accusations without verifiable evidence |
 | `Ujaran Kebencian` | Content attacking or degrading individuals/groups |
+| `Netral` | Neutral content that does not fall into DFK violations |
 | `Non-DFK` | Content outside DFK categories |
 
 ## Architecture
@@ -178,6 +181,8 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 | `POST /summarize` | Indonesian text summarization using a summarization system prompt. |
 | `_mtla_confidence` | Computes logit-based confidence score from first K generated token probabilities. |
 | `_parse_output` | Extracts `[LABEL]`, `[CONFIDENCE]`, and `[REASONING]` blocks from raw model output. |
+| `_is_fact_relevant` | Prevents unrelated optional facts from being included in the model prompt. |
+| `_clean_reasoning_output` / `_clean_summary_output` | Removes model-style CTA text, duplicate fact-check sections, and leaked prompt tags from API responses. |
 | HF Volume cache | `modal.Volume` named `dfk-8b-cache` persists downloaded weights across cold starts. |
 
 **Model loading flow:**
@@ -199,10 +204,32 @@ Memory snapshots are intentionally disabled because Unsloth checks for a visible
 
 ## API Call Logging
 
-Every successful `/classify` and `/summarize` call is appended as one JSON object per line in the Modal Volume:
+Every `/classify` and `/summarize` call is appended as one JSON object per line in the Modal Volume:
 
 ```text
 dfk-8b-cache:/api_logs/api_calls.jsonl
+```
+
+A second Weave-compatible trace log is written to:
+
+```text
+dfk-8b-cache:/api_logs/weave_traces.jsonl
+```
+
+The Weave-style records use these top-level keys, matching the exported JSONL structure:
+
+```text
+id, project_id, op_name, display_name, trace_id, parent_id, thread_id,
+turn_id, started_at, attributes, inputs, ended_at, exception, output,
+summary, wb_user_id, wb_run_id, wb_run_step, wb_run_step_end, deleted_at,
+expire_at, storage_size_bytes, total_storage_size_bytes
+```
+
+The `inputs` object uses the same columns visible in the Weave trace table:
+
+```text
+mode, image, image_preview, ringkasan, klaim, fakta, prompt, dfk_prompt,
+caption_prompt, model_prompt, messages_input, max_new_tokens, temperature
 ```
 
 Each record contains:
@@ -222,6 +249,7 @@ Download the live API logs:
 
 ```bash
 modal volume get dfk-8b-cache api_logs/api_calls.jsonl ./api_calls.jsonl --force
+modal volume get dfk-8b-cache api_logs/weave_traces.jsonl ./weave_traces.jsonl --force
 ```
 
 A metadata-only historical backfill from Modal logs is also stored at:
@@ -236,12 +264,14 @@ That backfill includes endpoint, timestamp, status, duration, and execution time
 
 | Setting | Value |
 |---------|-------|
-| GPU | NVIDIA H100 (80 GB VRAM) |
+| GPU | NVIDIA H100 requested; Modal may assign an H100-compatible H200 when available |
 | CPU | 4 vCPU |
 | Memory | 32 GB RAM |
 | Timeout | 600s |
 | Scale-down | 300s idle |
 | Precision | bfloat16 (full size, no quantization) |
 | Snapshot | Disabled for Unsloth GPU startup compatibility |
-| Model | aitf-komdigi/KomdigiITS-8B-DFK-TextClassification |
-| Parameters | 8.9B |
+| Model | hnuka/BEST-Ministral-8B-DFK-Final |
+| Parameters | 8B |
+
+The Hugging Face repository contains full model weights (`model.safetensors`) and does not expose LoRA adapter files such as `adapter_config.json` or `adapter_model.safetensors`, so it is loaded directly as a merged/full model.
