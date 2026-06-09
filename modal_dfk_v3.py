@@ -5,7 +5,7 @@ Model    : aitf-komdigi/KomdigiITS-8B-DFK-TextClassification
 Backend  : Unsloth FastLanguageModel (bfloat16, full size)
 GPU      : H100
 Endpoints: GET  /          → info page
-           POST /classify  → structured input (ringkasan, klaim, fakta, ...)
+          POST /classify  → structured input (klaim required; ringkasan/fakta optional)
            POST /summarize → { "text": "...", "temperature": 0.3 }
            GET  /docs      → Swagger UI
 """
@@ -59,10 +59,10 @@ CLASSIFY_SYSTEM = (
     "Anda adalah sistem analisis konten yang mendeteksi disinformasi, fitnah, "
     "dan ujaran kebencian dalam teks bahasa Indonesia.\n\n"
     "Input diberikan dalam format terstruktur:\n"
-    "- Ringkasan: konteks singkat postingan media sosial\n"
+    "- Ringkasan: konteks singkat postingan media sosial jika tersedia\n"
     "- Klaim: pernyataan atau tuduhan yang dibuat dalam postingan — INI YANG HARUS DIKLASIFIKASI\n"
-    "- Fakta: informasi terverifikasi sebagai pembanding\n\n"
-    "TUGAS UTAMA: Klasifikasi KLAIM berdasarkan perbandingan dengan FAKTA yang tersedia.\n"
+    "- Fakta: informasi terverifikasi sebagai pembanding jika tersedia\n\n"
+    "TUGAS UTAMA: Klasifikasi KLAIM. Jika FAKTA tersedia, bandingkan klaim dengan fakta tersebut.\n"
     "Jangan mengklasifikasi FAKTA itu sendiri — fokus pada apakah KLAIM tersebut:\n"
     "- Sesuai fakta terverifikasi → Fakta\n"
     "- Menyesatkan atau tidak akurat → Disinformasi\n"
@@ -73,7 +73,7 @@ CLASSIFY_SYSTEM = (
     "[LABEL] {nama kategori}\n"
     "[CONFIDENCE] {skor_persentase_keyakinan_anda}%\n"
     "[REASONING]\n"
-    "{poin-poin penalaran yang membandingkan klaim dengan fakta}"
+    "{poin-poin penalaran; bandingkan klaim dengan fakta jika fakta tersedia}"
 )
 
 SUMMARIZE_SYSTEM = (
@@ -92,9 +92,9 @@ a{color:#2563eb}</style></head><body>
 <p><b>Backend:</b> Unsloth &mdash; <b>GPU:</b> H100 80GB</p>
 <h3>POST /classify</h3>
 <pre>{{
-  "ringkasan": "Summary of the social media post",
   "klaim": "Claim made in the post",
-  "fakta": "Verified fact for comparison",
+  "ringkasan": "Optional summary of the social media post",
+  "fakta": "Optional verified fact for comparison",
   "image_url": "https://...",
   "max_new_tokens": 512,
   "temperature": 0.0,
@@ -112,9 +112,9 @@ a{color:#2563eb}</style></head><body>
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class ClassifyRequest(BaseModel):
-    ringkasan:      str             = Field(..., description="Summary of the social media post")
+    ringkasan:      Optional[str]   = Field(None, description="Optional summary of the social media post")
     klaim:          str             = Field(..., description="Claim made in the post")
-    fakta:          str             = Field(..., description="Verified fact for comparison")
+    fakta:          Optional[str]   = Field(None, description="Optional verified fact for comparison")
     image_url:      Optional[str]   = Field(None, description="Optional image URL for visual context")
     max_new_tokens: Optional[int]   = Field(512, ge=32, le=2048)
     temperature:    Optional[float] = Field(0.0, ge=0.0, le=1.0)
@@ -180,7 +180,7 @@ def _sanitize_body(raw: bytes) -> bytes:
 
 def _parse_output(raw: str):
     label, reasoning = "—", ""
-    clean = raw.split("<|im_end|>")[0].split("<|im_start|>")[0].split("</s>")[0].strip()
+    clean = raw.split("<|im_end")[0].split("<|im_start")[0].split("</s>")[0].strip()
     lines = clean.splitlines()
     reasoning_start = 0
 
@@ -290,10 +290,16 @@ class DFKModel:
             temperature = float(body.temperature if body.temperature is not None else 0.0)
             max_tokens  = int(body.max_new_tokens or 512)
 
-            if not ringkasan or not klaim or not fakta:
-                raise HTTPException(status_code=400, detail="ringkasan, klaim, dan fakta tidak boleh kosong.")
+            if not klaim:
+                raise HTTPException(status_code=400, detail="klaim tidak boleh kosong.")
 
-            user_msg = f"Ringkasan: {ringkasan}\nKlaim: {klaim}\nFakta: {fakta}"
+            context_parts = []
+            if ringkasan:
+                context_parts.append(f"Ringkasan: {ringkasan}")
+            context_parts.append(f"Klaim: {klaim}")
+            if fakta:
+                context_parts.append(f"Fakta: {fakta}")
+            user_msg = "\n".join(context_parts)
             if body.image_url and body.image_url not in ("string", ""):
                 user_msg += f"\nImage URL: {body.image_url}"
 
@@ -418,7 +424,7 @@ class DFKModel:
 
             gen_ids = out[0][input_len:]
             summary = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-            summary = summary.split("<|im_end|>")[0].split("</s>")[0].strip()
+            summary = summary.split("<|im_end")[0].split("<|im_start")[0].split("</s>")[0].strip()
 
             return SummarizeResponse(
                 summary         = summary,
