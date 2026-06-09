@@ -6,7 +6,7 @@ The model classifies content into DFK categories (Disinformasi, Fitnah, Kebencia
 
 ## Features
 
-- **DFK classification** — detects disinformation, slander, and hate speech from structured social media post metadata
+- **DFK classification** — detects disinformation, slander, and hate speech from a claim; optional summary/fact fields can improve context
 - **Summarization mode** — summarizes Indonesian text with a dedicated summarization prompt
 - **Multi-trial MTLA voting** — runs N generation trials, scores each via logit-based confidence (K=10 tokens), then majority-votes the result
 - **Greedy mode** — `temperature: 0` with single trial for fastest deterministic inference
@@ -63,9 +63,9 @@ modal app logs dfk-text-classification-v3
 
 ```json
 {
-  "ringkasan": "Summary of the social media post",
   "klaim": "Claim made in the post",
-  "fakta": "Verified fact for comparison",
+  "ringkasan": "Optional summary of the social media post",
+  "fakta": "Optional verified fact for comparison",
   "image_url": "https://...",
   "max_new_tokens": 128,
   "temperature": 0.0,
@@ -78,9 +78,7 @@ modal app logs dfk-text-classification-v3
 curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.run/classify" \
   -H "Content-Type: application/json" \
   -d '{
-    "ringkasan": "Vaksin COVID-19 diklaim mengandung chip mikro",
     "klaim": "Vaksin mengandung chip untuk memata-matai warga negara",
-    "fakta": "WHO dan Kemenkes menyatakan vaksin tidak mengandung chip apapun",
     "max_new_tokens": 256,
     "temperature": 0.0,
     "num_trials": 1
@@ -144,9 +142,9 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `ringkasan` | string | yes | — | Summary/context of the social media post |
+| `ringkasan` | string | no | null | Optional summary/context of the social media post |
 | `klaim` | string | yes | — | The specific claim or statement to classify |
-| `fakta` | string | yes | — | Verified fact(s) to compare the claim against |
+| `fakta` | string | no | null | Optional verified fact(s) to compare the claim against |
 | `image_url` | string | no | null | Optional image URL for additional context |
 | `max_new_tokens` | int | no | 512 | Max tokens to generate (32–2048) |
 | `temperature` | float | no | 0.0 | Sampling temperature. `0` = greedy. If `> 0` and `num_trials > 1`, enables MTLA voting |
