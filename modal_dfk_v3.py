@@ -51,13 +51,13 @@ image = (
 )
 
 VALID_LABELS = {"Fakta", "Netral", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"}
+PUBLIC_LABELS = {"Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"}
 
 LABEL_DESC = {
     "fakta":            "Konten yang sesuai dengan fakta",
     "disinformasi":     "Informasi yang menyesatkan",
     "fitnah":           "Tuduhan tanpa bukti",
     "ujaran kebencian": "Konten menyerang kelompok tertentu",
-    "netral":           "Konten netral atau tidak termasuk pelanggaran DFK",
     "non-dfk":          "Konten di luar kategori DFK",
     "—":                "Label tidak terdeteksi",
 }
@@ -253,6 +253,12 @@ def _parse_output(raw: str):
     elif reasoning.lower().startswith("analysis:"):
         reasoning = reasoning[len("analysis:"):].strip()
     return label, reasoning
+
+
+def _normalize_label(label: str) -> str:
+    if (label or "").strip().lower() == "netral":
+        return "Non-DFK"
+    return label
 
 
 def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
@@ -806,6 +812,7 @@ class DFKModel:
                 scores_i = [s[i:i+1] for s in out.scores]
                 conf     = _mtla_confidence(scores_i, gen_ids, K=10)
                 label, reasoning = _parse_output(gen_text)
+                label = _normalize_label(label)
                 reasoning = _clean_reasoning_output(reasoning)
                 trials.append({
                     "label": label,
