@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 APP_NAME  = "dfk-text-classification-v3"
 MODEL_ID  = "aitf-komdigi/KomdigiITS-8B-DFK-TextClassification"
 CACHE_DIR = "/cache/huggingface"
+LOG_DIR   = f"{CACHE_DIR}/api_logs"
+LOG_FILE  = f"{LOG_DIR}/api_calls.jsonl"
 
 app      = modal.App(APP_NAME)
 hf_cache = modal.Volume.from_name("dfk-8b-cache", create_if_missing=True)
@@ -217,6 +219,28 @@ def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
     return round(1.0 / (1.0 + math.exp(-(avg_lp + 2.5) * 1.5)), 4)
 
 
+def _append_jsonl(record: dict) -> None:
+    import json
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    # Persist the append to the Modal Volume so logs survive container shutdown.
+    try:
+        hf_cache.commit()
+    except Exception as exc:
+        print(f"API log volume commit failed: {exc}")
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 # ── Modal class ───────────────────────────────────────────────────────────────
 
 @app.cls(
@@ -256,6 +280,31 @@ class DFKModel:
             messages, tokenize=False, add_generation_prompt=True
         )
 
+    def _log_api_call(
+        self,
+        *,
+        request_id: str,
+        endpoint: str,
+        started_at: float,
+        input_payload: dict,
+        output_payload: Optional[dict] = None,
+        status: str = "success",
+        error: Optional[str] = None,
+    ) -> None:
+        import time
+
+        record = {
+            "request_id": request_id,
+            "timestamp": _utc_now_iso(),
+            "endpoint": endpoint,
+            "status": status,
+            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "input": input_payload,
+            "output": output_payload,
+            "error": error,
+        }
+        _append_jsonl(record)
+
     def _build_app(self):
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.responses import HTMLResponse
@@ -282,7 +331,13 @@ class DFKModel:
         def classify(body: ClassifyRequest):
             import torch
             import numpy as np
+            import time
+            import uuid
             from collections import Counter
+
+            started_at = time.perf_counter()
+            request_id = str(uuid.uuid4())
+            input_payload = body.model_dump()
 
             ringkasan   = (body.ringkasan or "").strip()
             klaim       = (body.klaim or "").strip()
@@ -291,6 +346,14 @@ class DFKModel:
             max_tokens  = int(body.max_new_tokens or 512)
 
             if not klaim:
+                self._log_api_call(
+                    request_id=request_id,
+                    endpoint="/classify",
+                    started_at=started_at,
+                    input_payload=input_payload,
+                    status="error",
+                    error="klaim tidak boleh kosong.",
+                )
                 raise HTTPException(status_code=400, detail="klaim tidak boleh kosong.")
 
             context_parts = []
@@ -361,7 +424,7 @@ class DFKModel:
             best_reason       = max(winners, key=lambda x: x["confidence"])["reasoning"]
             is_ambiguous      = count == 1 or avg_conf < 0.45
 
-            return ClassifyResponse(
+            response = ClassifyResponse(
                 label       = best_label.upper(),
                 label_key   = best_label.lower().replace(" ", "_"),
                 description = LABEL_DESC.get(best_label.lower(), ""),
@@ -380,15 +443,37 @@ class DFKModel:
                     for i, t in enumerate(trials)
                 ],
             )
+            self._log_api_call(
+                request_id=request_id,
+                endpoint="/classify",
+                started_at=started_at,
+                input_payload=input_payload,
+                output_payload=response.model_dump(),
+            )
+            return response
 
         @web.post("/summarize", response_model=SummarizeResponse)
         def summarize(body: SummarizeRequest):
             import torch
+            import time
+            import uuid
+
+            started_at = time.perf_counter()
+            request_id = str(uuid.uuid4())
+            input_payload = body.model_dump()
 
             text        = (body.text or "").strip()
             temperature = float(body.temperature or 0.3)
 
             if not text:
+                self._log_api_call(
+                    request_id=request_id,
+                    endpoint="/summarize",
+                    started_at=started_at,
+                    input_payload=input_payload,
+                    status="error",
+                    error="Teks tidak boleh kosong.",
+                )
                 raise HTTPException(status_code=400, detail="Teks tidak boleh kosong.")
 
             prompt = self._build_prompt(SUMMARIZE_SYSTEM, text)
@@ -426,11 +511,19 @@ class DFKModel:
             summary = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
             summary = summary.split("<|im_end")[0].split("<|im_start")[0].split("</s>")[0].strip()
 
-            return SummarizeResponse(
+            response = SummarizeResponse(
                 summary         = summary,
                 original_length = len(text),
                 summary_length  = len(summary),
             )
+            self._log_api_call(
+                request_id=request_id,
+                endpoint="/summarize",
+                started_at=started_at,
+                input_payload=input_payload,
+                output_payload=response.model_dump(),
+            )
+            return response
 
         return web
 
