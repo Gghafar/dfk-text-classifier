@@ -6,14 +6,14 @@ Backend  : Unsloth FastLanguageModel (bfloat16, full size)
 GPU      : H100
 Endpoints: GET  /          → info page
           POST /classify  → structured input (klaim required; ringkasan/fakta optional)
-           POST /summarize → { "text": "...", "temperature": 0.3 }
+	          POST /summarize → { "text": "...", "temperature": 0.0 }
            GET  /docs      → Swagger UI
 """
 
 import math
 import modal
 import os
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 APP_NAME  = "dfk-text-classification-v3"
@@ -22,7 +22,7 @@ CACHE_DIR = "/cache/huggingface"
 LOG_DIR   = f"{CACHE_DIR}/api_logs"
 LOG_FILE  = f"{LOG_DIR}/api_calls.jsonl"
 WEAVE_LOG_FILE = f"{LOG_DIR}/weave_traces.jsonl"
-WEAVE_PROJECT_ID = "Aitf-dfk-3/ministral-cpt"
+WEAVE_PROJECT_ID = "ghafaradi-its/ministral-cpt"
 WEAVE_OP_BASE = "dfk-text-classification-v3-generate"
 
 app      = modal.App(APP_NAME)
@@ -41,6 +41,7 @@ image = (
         "huggingface_hub[hf_transfer]",
         "packaging",
         "ninja",
+        "weave==0.52.42",
     )
     .run_commands(
         "pip install -q --no-deps 'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo'",
@@ -410,9 +411,21 @@ def _append_jsonl(record: dict, path: str = LOG_FILE) -> None:
 
 
 def _utc_now_iso() -> str:
+    return _utc_now_dt().isoformat().replace("+00:00", "Z")
+
+
+def _utc_now_dt():
     from datetime import datetime, timezone
 
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc)
+
+
+def _iso_to_dt(value: Optional[str]):
+    from datetime import datetime
+
+    if not value:
+        return _utc_now_dt()
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _weave_trace_name() -> str:
@@ -430,7 +443,7 @@ def _weave_attributes() -> dict:
     return {
         "weave": {
             "client_version": "local-jsonl",
-            "source": "modal-api-jsonl",
+            "source": "modal-api-wandb-weave",
             "sys_version": sys.version,
             "os_name": platform.system(),
             "os_version": platform.version(),
@@ -448,6 +461,7 @@ def _weave_attributes() -> dict:
     memory=32 * 1024,
     timeout=600,
     volumes={CACHE_DIR: hf_cache},
+    secrets=[modal.Secret.from_name("wandb-secret")],
     scaledown_window=300,
 )
 class DFKModel:
@@ -456,6 +470,7 @@ class DFKModel:
     def load_model(self):
         from unsloth import FastLanguageModel
 
+        self.weave_client = None
         token = os.environ.get("HF_TOKEN")
         kwargs = dict(model_name=MODEL_ID, max_seq_length=2048, load_in_4bit=False, device_map="auto")
         if token:
@@ -464,6 +479,8 @@ class DFKModel:
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(**kwargs)
         FastLanguageModel.for_inference(self.model)
         print("Model ready.")
+
+        self._init_wandb_weave()
 
     @modal.enter()
     def build_app(self):
@@ -478,6 +495,65 @@ class DFKModel:
             messages, tokenize=False, add_generation_prompt=True
         )
 
+    def _init_wandb_weave(self) -> None:
+        if not os.environ.get("WANDB_API_KEY"):
+            print("W&B Weave logging disabled: WANDB_API_KEY is not set.")
+            return
+
+        try:
+            import weave
+
+            self.weave_client = weave.init(WEAVE_PROJECT_ID)
+            print(f"W&B Weave logging enabled for project {WEAVE_PROJECT_ID}.")
+        except Exception as exc:
+            self.weave_client = None
+            print(f"W&B Weave init failed; continuing with local JSONL logs only: {exc}")
+
+    def _start_wandb_weave_call(
+        self,
+        *,
+        trace_name: str,
+        weave_inputs: dict[str, Any],
+        started_at_dt,
+    ):
+        client = getattr(self, "weave_client", None)
+        if client is None:
+            return None
+
+        try:
+            return client.create_call(
+                op=trace_name,
+                inputs=weave_inputs,
+                attributes=_weave_attributes(),
+                started_at=started_at_dt,
+            )
+        except Exception as exc:
+            print(f"W&B Weave create_call failed; continuing with local JSONL logs: {exc}")
+            return None
+
+    def _finish_wandb_weave_call(
+        self,
+        *,
+        call,
+        weave_output: Optional[dict],
+        error: Optional[str],
+        ended_at_dt,
+    ) -> None:
+        client = getattr(self, "weave_client", None)
+        if client is None or call is None:
+            return
+
+        try:
+            exception = RuntimeError(error) if error else None
+            client.finish_call(
+                call,
+                output=weave_output,
+                exception=exception,
+                ended_at=ended_at_dt,
+            )
+        except Exception as exc:
+            print(f"W&B Weave finish_call failed; continuing with local JSONL logs: {exc}")
+
     def _log_api_call(
         self,
         *,
@@ -491,12 +567,15 @@ class DFKModel:
         started_at_iso: Optional[str] = None,
         weave_inputs: Optional[dict] = None,
         weave_output: Optional[dict] = None,
+        trace_name: Optional[str] = None,
+        wandb_call=None,
     ) -> None:
         import time
         import uuid
 
         try:
-            ended_at_iso = _utc_now_iso()
+            ended_at_dt = _utc_now_dt()
+            ended_at_iso = ended_at_dt.isoformat().replace("+00:00", "Z")
             latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
             record = {
                 "request_id": request_id,
@@ -510,8 +589,24 @@ class DFKModel:
             }
             _append_jsonl(record)
 
-            trace_name = _weave_trace_name()
+            trace_name = trace_name or _weave_trace_name()
             trace_id = request_id
+            final_weave_inputs = weave_inputs or input_payload
+            final_weave_output = weave_output if weave_output is not None else output_payload
+
+            if getattr(self, "weave_client", None) is not None:
+                call = wandb_call or self._start_wandb_weave_call(
+                    trace_name=trace_name,
+                    weave_inputs=final_weave_inputs,
+                    started_at_dt=_iso_to_dt(started_at_iso),
+                )
+                self._finish_wandb_weave_call(
+                    call=call,
+                    weave_output=final_weave_output,
+                    error=error,
+                    ended_at_dt=ended_at_dt,
+                )
+
             weave_record = {
                 "id": str(uuid.uuid4()),
                 "project_id": WEAVE_PROJECT_ID,
@@ -523,10 +618,10 @@ class DFKModel:
                 "turn_id": None,
                 "started_at": started_at_iso or ended_at_iso,
                 "attributes": _weave_attributes(),
-                "inputs": weave_inputs or input_payload,
+                "inputs": final_weave_inputs,
                 "ended_at": ended_at_iso,
                 "exception": error,
-                "output": weave_output if weave_output is not None else output_payload,
+                "output": final_weave_output,
                 "summary": {
                     "status_counts": {
                         "success": 1 if status == "success" else 0,
@@ -582,7 +677,8 @@ class DFKModel:
             from collections import Counter
 
             started_at = time.perf_counter()
-            started_at_iso = _utc_now_iso()
+            started_at_dt = _utc_now_dt()
+            started_at_iso = started_at_dt.isoformat().replace("+00:00", "Z")
             request_id = str(uuid.uuid4())
             input_payload = body.model_dump()
 
@@ -594,6 +690,7 @@ class DFKModel:
             effective_fakta = fakta if _is_fact_relevant(klaim, fakta) else ""
 
             if not klaim:
+                trace_name = _weave_trace_name()
                 self._log_api_call(
                     request_id=request_id,
                     endpoint="/classify",
@@ -617,6 +714,7 @@ class DFKModel:
                         "max_new_tokens": max_tokens,
                         "temperature": temperature,
                     },
+                    trace_name=trace_name,
                 )
                 raise HTTPException(status_code=400, detail="klaim tidak boleh kosong.")
 
@@ -659,6 +757,12 @@ class DFKModel:
                 "max_new_tokens": max_tokens,
                 "temperature": temperature,
             }
+            trace_name = _weave_trace_name()
+            wandb_call = self._start_wandb_weave_call(
+                trace_name=trace_name,
+                weave_inputs=weave_inputs,
+                started_at_dt=started_at_dt,
+            )
 
             device = next(self.model.parameters()).device
             inputs = self.tokenizer(
@@ -756,6 +860,8 @@ class DFKModel:
                     },
                     "api_response": response.model_dump(),
                 },
+                trace_name=trace_name,
+                wandb_call=wandb_call,
             )
             return response
 
@@ -766,7 +872,8 @@ class DFKModel:
             import uuid
 
             started_at = time.perf_counter()
-            started_at_iso = _utc_now_iso()
+            started_at_dt = _utc_now_dt()
+            started_at_iso = started_at_dt.isoformat().replace("+00:00", "Z")
             request_id = str(uuid.uuid4())
             input_payload = body.model_dump()
 
@@ -774,6 +881,7 @@ class DFKModel:
             temperature = float(body.temperature if body.temperature is not None else 0.0)
 
             if not text:
+                trace_name = _weave_trace_name()
                 self._log_api_call(
                     request_id=request_id,
                     endpoint="/summarize",
@@ -797,6 +905,7 @@ class DFKModel:
                         "max_new_tokens": 512,
                         "temperature": temperature,
                     },
+                    trace_name=trace_name,
                 )
                 raise HTTPException(status_code=400, detail="Teks tidak boleh kosong.")
 
@@ -805,6 +914,27 @@ class DFKModel:
                 {"role": "system", "content": SUMMARIZE_SYSTEM},
                 {"role": "user", "content": text},
             ]
+            weave_inputs = {
+                "mode": "summarize",
+                "image": None,
+                "image_preview": None,
+                "ringkasan": "",
+                "klaim": "",
+                "fakta": "",
+                "prompt": text,
+                "dfk_prompt": None,
+                "caption_prompt": None,
+                "model_prompt": prompt,
+                "messages_input": messages_input,
+                "max_new_tokens": 512,
+                "temperature": temperature,
+            }
+            trace_name = _weave_trace_name()
+            wandb_call = self._start_wandb_weave_call(
+                trace_name=trace_name,
+                weave_inputs=weave_inputs,
+                started_at_dt=started_at_dt,
+            )
 
             device = next(self.model.parameters()).device
             inputs = self.tokenizer(
@@ -852,21 +982,7 @@ class DFKModel:
                 input_payload=input_payload,
                 output_payload=response.model_dump(),
                 started_at_iso=started_at_iso,
-                weave_inputs={
-                    "mode": "summarize",
-                    "image": None,
-                    "image_preview": None,
-                    "ringkasan": "",
-                    "klaim": "",
-                    "fakta": "",
-                    "prompt": text,
-                    "dfk_prompt": None,
-                    "caption_prompt": None,
-                    "model_prompt": prompt,
-                    "messages_input": messages_input,
-                    "max_new_tokens": 512,
-                    "temperature": temperature,
-                },
+                weave_inputs=weave_inputs,
                 weave_output={
                     "text": summary,
                     "tokens_generated": int(len(gen_ids)),
@@ -874,6 +990,8 @@ class DFKModel:
                     "total_request_ms": round((time.perf_counter() - started_at) * 1000),
                     "api_response": response.model_dump(),
                 },
+                trace_name=trace_name,
+                wandb_call=wandb_call,
             )
             return response
 
