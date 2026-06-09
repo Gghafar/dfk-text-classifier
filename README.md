@@ -173,8 +173,9 @@ curl -X POST "https://gghafar--dfk-text-classification-v3-dfkmodel-serve.modal.r
 | `Disinformasi` | Misleading or inaccurate information |
 | `Fitnah` | Serious accusations without verifiable evidence |
 | `Ujaran Kebencian` | Content attacking or degrading individuals/groups |
-| `Netral` | Neutral content that does not fall into DFK violations |
 | `Non-DFK` | Content outside DFK categories |
+
+If the raw model emits `Netral`, the API normalizes it to `Non-DFK` so the public response remains the trained 5-label schema.
 
 ## Architecture
 
