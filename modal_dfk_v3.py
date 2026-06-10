@@ -50,15 +50,25 @@ image = (
     )
 )
 
-VALID_LABELS = {"Fakta", "Netral", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"}
-PUBLIC_LABELS = {"Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Non-DFK"}
+VALID_LABELS = {
+    "Fakta",
+    "Disinformasi",
+    "Fitnah",
+    "Ujaran Kebencian",
+    "Bukan DFK",
+    "Non-DFK",
+    "Netral",
+    "Tidak Berita",
+    "Tidak Terklasifikasi",
+}
+PUBLIC_LABELS = {"Fakta", "Disinformasi", "Fitnah", "Ujaran Kebencian", "Bukan DFK"}
 
 LABEL_DESC = {
     "fakta":            "Konten yang sesuai dengan fakta",
     "disinformasi":     "Informasi yang menyesatkan",
     "fitnah":           "Tuduhan tanpa bukti",
     "ujaran kebencian": "Konten menyerang kelompok tertentu",
-    "non-dfk":          "Konten di luar kategori DFK",
+    "bukan dfk":        "Konten di luar kategori DFK",
     "—":                "Label tidak terdeteksi",
 }
 
@@ -81,7 +91,7 @@ CLASSIFY_SYSTEM = (
     "- Menyesatkan atau tidak akurat → Disinformasi\n"
     "- Tuduhan serius tanpa bukti yang dapat diverifikasi → Fitnah\n"
     "- Menyerang atau merendahkan kelompok/individu → Ujaran Kebencian\n"
-    "- Di luar kategori di atas → Non-DFK\n\n"
+    "- Di luar kategori di atas → Bukan DFK\n\n"
     "Format output WAJIB:\n"
     "[LABEL] {nama kategori}\n"
     "[CONFIDENCE] {skor_persentase_keyakinan_anda}%\n"
@@ -256,9 +266,27 @@ def _parse_output(raw: str):
 
 
 def _normalize_label(label: str) -> str:
-    if (label or "").strip().lower() == "netral":
-        return "Non-DFK"
-    return label
+    import re
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", (label or "").strip().lower()).strip()
+    aliases = {
+        "fakta": "Fakta",
+        "disinformasi": "Disinformasi",
+        "fitnah": "Fitnah",
+        "ujaran kebencian": "Ujaran Kebencian",
+        "bukan dfk": "Bukan DFK",
+        "non dfk": "Bukan DFK",
+        "netral": "Bukan DFK",
+        "tidak berita": "Bukan DFK",
+        "tidak terklasifikasi": "Bukan DFK",
+    }
+    return aliases.get(normalized, "Bukan DFK")
+
+
+def _label_key(label: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
 
 def _mtla_confidence(scores_list, gen_ids, K: int = 10) -> float:
@@ -831,7 +859,7 @@ class DFKModel:
 
             response = ClassifyResponse(
                 label       = best_label.upper(),
-                label_key   = best_label.lower().replace(" ", "_"),
+                label_key   = _label_key(best_label),
                 description = LABEL_DESC.get(best_label.lower(), ""),
                 confidence  = round(avg_conf * 100, 1),
                 consistency = f"{count}/{num_trials}",
